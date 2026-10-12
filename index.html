@@ -1,0 +1,739 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>KCS Incorrect CSA Report Portal</title>
+
+<!-- Allow Microsoft identity + Graph + SharePoint download hosts + script CDNs.
+     script-src/style-src are intentionally NOT declared (handled by the host CSP). -->
+<meta http-equiv="Content-Security-Policy" content="
+  connect-src 'self' https://login.microsoftonline.com https://login.windows.net https://graph.microsoft.com https://*.sharepoint.com https://*.sharepointonline.com https://*.svc.ms https://*.1drv.com https://cdn.jsdelivr.net https://unpkg.com https://alcdn.msauth.net;
+  frame-src 'self' https://login.microsoftonline.com;
+  img-src 'self' data: https://graph.microsoft.com;
+" />
+
+<!-- SheetJS (XLSX parsing) from an allow-listed CDN. MSAL is loaded dynamically (see loadMsalScript). -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+<style>
+  :root{
+    --sap-blue:#1B90FF;
+    --sap-link:#0070F2;
+    --sap-navy:#002A86;
+    --sky:#D1EFFF;
+    --ink:#1a1a1a;
+    --gray-d:#666666;
+    --gray-m:#999999;
+    --gray-l:#EAECEE;
+    --pos:#107e3e;
+    --pos-bg:#ebf5eb;
+    --neg:#aa0808;
+    --neg-bg:#ffeaea;
+    --warn:#996600;
+    --warn-bg:#fdf3e5;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    font-family:"72 Brand","72",Arial,Helvetica,sans-serif;
+    color:var(--ink);
+    background:#ffffff;
+    font-size:14px;
+    line-height:1.45;
+  }
+  header.appbar{
+    display:flex;align-items:center;gap:16px;
+    padding:12px 24px;
+    background:#ffffff;
+    border-bottom:1px solid var(--gray-l);
+    position:sticky;top:0;z-index:50;
+  }
+  .logo{height:34px;width:auto;display:block;}
+  .titles{display:flex;flex-direction:column;line-height:1.15;}
+  .titles .t1{font-size:17px;font-weight:600;color:var(--ink);}
+  .titles .t2{font-size:12px;color:var(--gray-d);}
+  .spacer{flex:1;}
+  .user{font-size:13px;color:var(--gray-d);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  button{
+    font-family:inherit;font-size:13px;
+    border:1px solid var(--sap-blue);
+    background:var(--sap-blue);color:#fff;
+    padding:8px 16px;border-radius:6px;cursor:pointer;
+    transition:background .15s,opacity .15s;
+  }
+  button:hover:not(:disabled){background:#0a74d6;}
+  button:disabled{opacity:.55;cursor:not-allowed;}
+  button.secondary{background:#fff;color:var(--sap-link);border-color:#c8d2dc;}
+  button.secondary:hover:not(:disabled){background:#f3f8ff;}
+  main{padding:20px 24px 48px;}
+  /* Login card */
+  .center-wrap{min-height:60vh;display:flex;align-items:center;justify-content:center;}
+  .card{
+    max-width:520px;width:100%;
+    border:1px solid var(--gray-l);border-radius:12px;
+    padding:32px;text-align:center;background:#fff;
+    box-shadow:0 1px 4px rgba(0,0,0,.05);
+  }
+  .card h1{font-size:20px;margin:0 0 8px;}
+  .card p{color:var(--gray-d);margin:0 0 20px;}
+  /* Toolbar */
+  .toolbar{
+    display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;
+    margin-bottom:16px;
+  }
+  .field{display:flex;flex-direction:column;gap:4px;}
+  .field label{font-size:11px;color:var(--gray-d);text-transform:uppercase;letter-spacing:.04em;}
+  select,input[type="search"]{
+    font-family:inherit;font-size:13px;padding:7px 10px;
+    border:1px solid #c8d2dc;border-radius:6px;background:#fff;min-width:220px;color:var(--ink);
+  }
+  input[type="search"]{min-width:260px;}
+  .count{font-size:13px;color:var(--gray-d);align-self:center;}
+  /* Status */
+  .status{display:flex;align-items:center;gap:12px;padding:14px 16px;border-radius:8px;background:var(--sky);color:var(--sap-navy);margin-bottom:16px;}
+  .status.err{background:var(--neg-bg);color:var(--neg);}
+  .spinner{width:18px;height:18px;border:3px solid rgba(27,144,255,.3);border-top-color:var(--sap-blue);border-radius:50%;animation:spin .8s linear infinite;flex:none;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  .hidden{display:none !important;}
+  /* Table */
+  .table-wrap{border:1px solid var(--gray-l);border-radius:10px;overflow:auto;max-height:70vh;}
+  table{border-collapse:collapse;width:100%;font-size:12.5px;}
+  thead th{
+    position:sticky;top:0;z-index:2;
+    background:var(--sap-navy);color:#fff;text-align:left;
+    padding:10px 12px;font-weight:600;white-space:nowrap;border-right:1px solid rgba(255,255,255,.12);
+  }
+  tbody td{padding:8px 12px;border-bottom:1px solid var(--gray-l);border-right:1px solid var(--gray-l);vertical-align:top;white-space:nowrap;}
+  tbody tr:nth-child(even){background:#fafcff;}
+  tbody tr.mismatch{background:var(--neg-bg);}
+  tbody tr.mismatch:hover,tbody tr:hover{background:#eef6ff;}
+  .badge{display:inline-block;padding:2px 9px;border-radius:11px;font-size:11px;font-weight:600;white-space:nowrap;}
+  .badge.yes{background:var(--pos-bg);color:var(--pos);}
+  .badge.no{background:var(--neg-bg);color:var(--neg);}
+  .badge.na{background:var(--warn-bg);color:var(--warn);}
+  .muted{color:var(--gray-m);}
+  .foot{margin-top:10px;font-size:11px;color:var(--gray-m);}
+  /* Toast */
+  #toast{
+    position:fixed;left:50%;bottom:28px;transform:translateX(-50%);
+    background:#1a1a1a;color:#fff;padding:12px 20px;border-radius:8px;
+    font-size:13px;max-width:80vw;box-shadow:0 4px 16px rgba(0,0,0,.25);
+    opacity:0;pointer-events:none;transition:opacity .25s;z-index:100;
+  }
+  #toast.show{opacity:1;}
+</style>
+</head>
+<body>
+<header class="appbar">
+  <!-- SAP primary logo (inline, unmodified 412x204 ratio) -->
+  <svg class="logo" viewBox="0 0 412.4 204" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="SAP">
+    <linearGradient id="sapgrad" gradientUnits="userSpaceOnUse" x1="206.19" y1="206" x2="206.19" y2="2" gradientTransform="matrix(1 0 0 -1 0 206)">
+      <stop offset="0" style="stop-color:#00B8F1"/><stop offset="0.02" style="stop-color:#01B6F0"/>
+      <stop offset="0.31" style="stop-color:#0D90D9"/><stop offset="0.58" style="stop-color:#1775C8"/>
+      <stop offset="0.82" style="stop-color:#1C65BF"/><stop offset="1" style="stop-color:#1E5FBB"/>
+    </linearGradient>
+    <polyline style="fill-rule:evenodd;clip-rule:evenodd;fill:url(#sapgrad);" points="0,204 208.4,204 412.4,0 0,0 0,204 "/>
+    <path style="fill-rule:evenodd;clip-rule:evenodd;fill:#FFFFFF;" d="M244.7,38.4h-40.6v96.5l-35.5-96.6h-35.2l-30.3,80.7C100,98.7,79,91.7,62.4,86.4C51.5,82.9,39.8,77.7,40,72 c0.1-4.7,6.2-9,18.4-8.4c8.2,0.4,15.4,1.1,29.7,8l14.1-24.5c-13.1-6.6-31.2-10.9-46-10.9h-0.1c-17.3,0-31.7,5.6-40.6,14.8 c-6.2,6.3-9.7,14.8-9.7,23.7C5.5,87.2,10.1,96,19.7,103c8.1,5.9,18.5,9.8,27.6,12.6c11.3,3.5,20.5,6.5,20.4,13 c-0.1,2.4-1,4.7-2.7,6.4c-2.8,2.9-7.1,4-13.1,4.1c-11.5,0.2-20-1.6-33.6-9.6L5.8,154.4c14,8,29.9,12.2,46,12.2h2.1 c14.2-0.2,25.7-4.3,34.9-11.7c0.5-0.4,1-0.8,1.5-1.3l-4.1,10.9H123l6.2-18.8c7,2.3,14.3,3.5,21.7,3.4c7.2,0,14.3-1.1,21.2-3.2 l6,18.6h60.1v-39h13.1c31.7,0,50.5-16.2,50.5-43.2C301.7,52.2,283.5,38.4,244.7,38.4z M150.9,121c-4.4,0-8.8-0.7-13-2.3l12.9-40.6 h0.2l12.6,40.7C159.6,120.3,155.2,121,150.9,121z M247.1,97.7h-8.9V64.9h8.9c11.9,0,21.4,4,21.4,16.1 C268.5,93.7,259,97.6,247.1,97.7"/>
+  </svg>
+  <div class="titles">
+    <span class="t1">KCS Incorrect CSA</span>
+    <span class="t2">Incorrect CSA Report</span>
+  </div>
+  <div class="spacer"></div>
+  <span id="userLabel" class="user"></span>
+  <button id="signOutBtn" class="secondary hidden">Sign out</button>
+  <button id="signInBtn" disabled>Initializing...</button>
+</header>
+
+<main>
+  <!-- Login view -->
+  <section id="loginView" class="center-wrap">
+    <div class="card">
+      <h1>Sign in to view the report</h1>
+      <p>This portal reads the files in the <strong>KCS Incorrect CSA</strong> SharePoint folder and builds the Incorrect CSA report live in your browser. Sign in with your SAP Microsoft account to continue.</p>
+      <button id="loginCardBtn" disabled>Initializing...</button>
+    </div>
+  </section>
+
+  <!-- Report view -->
+  <section id="reportView" class="hidden">
+    <div id="statusBar" class="status hidden"></div>
+
+    <div class="toolbar" id="toolbar">
+      <div class="field">
+        <label for="selCases">Cases vs. CSA file</label>
+        <select id="selCases"></select>
+      </div>
+      <div class="field">
+        <label for="selAgents">Agent Masterlist file</label>
+        <select id="selAgents"></select>
+      </div>
+      <div class="field">
+        <label for="selCsa">All CSAs for Incorrect CSA report file</label>
+        <select id="selCsa"></select>
+      </div>
+      <div class="field">
+        <label for="selMatch">Account ID match</label>
+        <select id="selMatch">
+          <option value="all">Show all</option>
+          <option value="no">Mismatches only (No)</option>
+          <option value="yes">Matches only (Yes)</option>
+          <option value="na">No CSA match only</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="search">Search</label>
+        <input id="search" type="search" placeholder="Filter any column..." />
+      </div>
+      <button id="rebuildBtn" class="secondary">Rebuild</button>
+      <button id="refreshBtn" class="secondary">Reload from SharePoint</button>
+      <button id="exportBtn" class="secondary">Export CSV</button>
+      <span id="rowCount" class="count"></span>
+    </div>
+
+    <div class="table-wrap">
+      <table id="reportTable">
+        <thead><tr id="headRow"></tr></thead>
+        <tbody id="bodyRows"></tbody>
+      </table>
+    </div>
+    <div class="foot" id="mapNote"></div>
+  </section>
+</main>
+
+<div id="toast"></div>
+
+<script>
+/* ============================================================
+   Configuration
+   ============================================================ */
+const CLIENT_ID = "ff9d082b-727e-4024-afb5-301120784a99";
+const TENANT_ID = "42f7676c-f455-423c-82f6-dc2d99791af7";
+// Must point at the actual published page (which runs MSAL and processes the auth
+// response). The bare origin root returns EKX's "Not Found" page, so the sign-in
+// code never reaches an MSAL-aware page. This is the exact URL where the page is served.
+const REDIRECT_URI = "https://static.ekx.cloud.sap/347766cb-bcb0-44b6-8631-3f5ac8121334/";
+const SHARE_URL = "https://sap.sharepoint.com/:f:/s/214668/IgCS1Kyt9vgCT4WYPT4UDzuYAdytZoVQv4plgc5r0BM6NFg?e=GjX2N5";
+const GRAPH = "https://graph.microsoft.com/v1.0";
+const SCOPES = ["User.Read", "Files.Read.All", "Sites.Read.All"];
+
+/* NOTE on the Client Secret:
+   A browser Single-Page App (public client) authenticates with PKCE and MUST NOT
+   embed a client secret — a secret in client-side code would be exposed to every
+   viewer. The provided secret is therefore intentionally NOT used here. If a secret
+   is ever required, that is a confidential (server-side) flow, which this portal does
+   not use. */
+
+const msalConfig = {
+  auth: {
+    clientId: CLIENT_ID,
+    authority: "https://login.microsoftonline.com/" + TENANT_ID,
+    redirectUri: REDIRECT_URI,
+    navigateToLoginRequestUrl: false
+  },
+  cache: { cacheLocation: "sessionStorage", storeAuthStateInCookie: false }
+};
+const loginRequest = { scopes: SCOPES };
+
+/* ============================================================
+   1. Dynamic MSAL loader with 3-CDN fallback chain
+   ============================================================ */
+function loadMsalScript() {
+  const urls = [
+    "https://cdn.jsdelivr.net/npm/@azure/msal-browser@2.39.0/lib/msal-browser.min.js",
+    "https://unpkg.com/@azure/msal-browser@2.39.0/lib/msal-browser.min.js",
+    "https://alcdn.msauth.net/browser/2.39.0/js/msal-browser.min.js"
+  ];
+  return new Promise((resolve, reject) => {
+    let i = 0;
+    function tryNext() {
+      if (typeof msal !== "undefined") { resolve(); return; }
+      if (i >= urls.length) { reject(new Error("Failed to load MSAL from all CDNs")); return; }
+      const url = urls[i++];
+      const s = document.createElement("script");
+      s.src = url;
+      s.async = true;
+      s.onload = function () {
+        if (typeof msal !== "undefined") resolve();
+        else { s.remove(); tryNext(); }
+      };
+      s.onerror = function () { s.remove(); tryNext(); };
+      document.head.appendChild(s);
+    }
+    tryNext();
+  });
+}
+
+/* ============================================================
+   2. Single initialization promise
+   ============================================================ */
+const msalReady = (async () => {
+  await loadMsalScript();
+  const instance = new msal.PublicClientApplication(msalConfig);
+  await instance.initialize();
+  await instance.handleRedirectPromise();   // completes any redirect-based sign-in
+  return instance;
+})();
+
+/* ============================================================
+   MSAL-dependent functions (each begins with: await msalReady)
+   ============================================================ */
+async function signIn() {
+  const instance = await msalReady;
+  try {
+    const result = await instance.loginPopup(loginRequest);
+    instance.setActiveAccount(result.account);
+    onSignedIn();
+  } catch (e) {
+    const code = e && e.errorCode;
+    if (code === "popup_window_error" || code === "empty_window_error") {
+      await instance.loginRedirect(loginRequest);
+    } else if (code === "user_cancelled") {
+      /* user closed the popup — do nothing */
+    } else {
+      showToast((e && e.message) || "Sign-in failed. Please try again.");
+    }
+  }
+}
+
+async function signOut() {
+  const instance = await msalReady;
+  const account = instance.getActiveAccount() || instance.getAllAccounts()[0] || null;
+  try {
+    await instance.logoutPopup({ account: account, mainWindowRedirectUri: REDIRECT_URI });
+  } catch (e) {
+    const code = e && e.errorCode;
+    if (code === "popup_window_error" || code === "empty_window_error") {
+      await instance.logoutRedirect({ account: account });
+    } else if (code === "user_cancelled") {
+      /* ignore */
+    } else {
+      showToast((e && e.message) || "Sign-out failed.");
+    }
+  }
+}
+
+async function getToken() {
+  const instance = await msalReady;
+  const account = instance.getActiveAccount() || instance.getAllAccounts()[0];
+  if (!account) throw new Error("Not signed in");
+  try {
+    const r = await instance.acquireTokenSilent(Object.assign({}, loginRequest, { account: account }));
+    return r.accessToken;
+  } catch (e) {
+    const r = await instance.acquireTokenPopup(loginRequest);
+    return r.accessToken;
+  }
+}
+
+/* ============================================================
+   UI helpers
+   ============================================================ */
+const $ = (id) => document.getElementById(id);
+let toastTimer = null;
+function showToast(msg) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 5000);
+}
+function setStatus(msg, isError) {
+  const bar = $("statusBar");
+  if (!msg) { bar.classList.add("hidden"); bar.innerHTML = ""; return; }
+  bar.classList.remove("hidden");
+  bar.className = "status" + (isError ? " err" : "");
+  bar.innerHTML = (isError ? "" : '<span class="spinner"></span>') +
+                  '<span></span>';
+  bar.lastChild.textContent = msg;
+}
+
+function onSignedIn() {
+  (async () => {
+    const instance = await msalReady;
+    const acct = instance.getActiveAccount() || instance.getAllAccounts()[0];
+    $("loginView").classList.add("hidden");
+    $("reportView").classList.remove("hidden");
+    $("signOutBtn").classList.remove("hidden");
+    $("signInBtn").classList.add("hidden");
+    $("userLabel").textContent = acct ? (acct.name || acct.username || "") : "";
+    loadFromSharePoint();
+  })();
+}
+
+function onSignedOut() {
+  $("reportView").classList.add("hidden");
+  $("loginView").classList.remove("hidden");
+  $("signOutBtn").classList.add("hidden");
+  $("signInBtn").classList.remove("hidden");
+  $("userLabel").textContent = "";
+}
+
+/* ============================================================
+   Graph / SharePoint access
+   ============================================================ */
+function encodeShareUrl(url) {
+  const b64 = btoa(unescape(encodeURIComponent(url)));
+  return "u!" + b64.replace(/=+$/g, "").replace(/\//g, "_").replace(/\+/g, "-");
+}
+
+async function graphGet(path) {
+  const token = await getToken();
+  const res = await fetch(GRAPH + path, { headers: { Authorization: "Bearer " + token } });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error("Graph " + res.status + " on " + path + (txt ? " — " + txt.slice(0, 180) : ""));
+  }
+  return res.json();
+}
+
+async function listFolderFiles() {
+  const token = await getToken();
+  const shareToken = encodeShareUrl(SHARE_URL);
+  let items = [];
+  let next = GRAPH + "/shares/" + shareToken + "/driveItem/children?$top=200";
+  while (next) {
+    const res = await fetch(next, { headers: { Authorization: "Bearer " + token } });
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      throw new Error("Could not list folder (" + res.status + ")" + (txt ? " — " + txt.slice(0, 180) : ""));
+    }
+    const data = await res.json();
+    items = items.concat(data.value || []);
+    next = data["@odata.nextLink"] || null;
+  }
+  return items.filter((it) => it.file);   // files only
+}
+
+async function downloadWorkbook(item) {
+  // Prefer the pre-authenticated download URL (no auth header, CORS-friendly).
+  let dlUrl = item["@microsoft.graph.downloadUrl"] || item["@content.downloadUrl"];
+  if (!dlUrl && item.parentReference && item.parentReference.driveId) {
+    const meta = await graphGet("/drives/" + item.parentReference.driveId + "/items/" + item.id +
+                                "?$select=id,@microsoft.graph.downloadUrl");
+    dlUrl = meta["@microsoft.graph.downloadUrl"];
+  }
+  let buf;
+  if (dlUrl) {
+    const res = await fetch(dlUrl);
+    if (!res.ok) throw new Error("Download failed (" + res.status + ") for " + item.name);
+    buf = await res.arrayBuffer();
+  } else {
+    // Fallback: authenticated content endpoint
+    const token = await getToken();
+    const res = await fetch(GRAPH + "/drives/" + item.parentReference.driveId + "/items/" + item.id + "/content",
+                            { headers: { Authorization: "Bearer " + token } });
+    if (!res.ok) throw new Error("Download failed (" + res.status + ") for " + item.name);
+    buf = await res.arrayBuffer();
+  }
+  return XLSX.read(buf, { type: "array" });
+}
+
+/* ============================================================
+   Column / value utilities
+   ============================================================ */
+function norm(s) {
+  return String(s == null ? "" : s).replace(/\u00a0/g, " ").trim().toLowerCase().replace(/\s+/g, " ");
+}
+function normId(s) {
+  return String(s == null ? "" : s).replace(/[\s'",.]/g, "").toUpperCase();
+}
+function normName(s) {
+  // normalise person names: handle "Last, First" -> "first last"
+  let v = String(s == null ? "" : s).replace(/\u00a0/g, " ").trim();
+  if (v.indexOf(",") > -1) {
+    const parts = v.split(",");
+    if (parts.length === 2) v = parts[1].trim() + " " + parts[0].trim();
+  }
+  return v.toLowerCase().replace(/\s+/g, " ");
+}
+
+// Resolve a logical column to an actual header, trying exact-normalised match then "contains".
+function findCol(headers, candidates, used) {
+  used = used || [];
+  const H = headers.map((h) => ({ raw: h, n: norm(h) }));
+  // exact normalised match
+  for (const c of candidates) {
+    const cn = norm(c);
+    const hit = H.find((h) => h.n === cn && used.indexOf(h.raw) === -1);
+    if (hit) return hit.raw;
+  }
+  // startsWith / contains match
+  for (const c of candidates) {
+    const cn = norm(c);
+    const hit = H.find((h) => used.indexOf(h.raw) === -1 && (h.n.indexOf(cn) > -1 || cn.indexOf(h.n) > -1 && h.n.length > 2));
+    if (hit) return hit.raw;
+  }
+  return null;
+}
+
+function sheetRows(wb) {
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  return XLSX.utils.sheet_to_json(ws, { defval: "", raw: false });
+}
+
+/* ============================================================
+   Report columns + build logic
+   ============================================================ */
+const COLUMNS = [
+  "Case Number", "18 Digit Account ID", "Account ID", "Account Name",
+  "Knowledge Article ID", "Knowledge Article Version ID", "Article Version: Title",
+  "Case Owner", "Case Owner - Manager", "CSA Account ID", "CSA Account Name",
+  "Account ID match?"
+];
+
+let STATE = {
+  files: [],          // all folder files
+  reportRows: [],     // built rows (array of objects keyed by COLUMNS)
+  mapNotes: []        // header-mapping diagnostics
+};
+
+async function loadFromSharePoint() {
+  try {
+    setStatus("Loading files from the KCS Incorrect CSA folder…", false);
+    const files = await listFolderFiles();
+    STATE.files = files;
+    if (!files.length) {
+      setStatus("No files found in the shared folder, or access was denied.", true);
+      return;
+    }
+    populateFileSelectors(files);
+    await buildReport();
+  } catch (e) {
+    setStatus(e.message || String(e), true);
+  }
+}
+
+function bestMatch(files, patterns) {
+  // return the file whose name matches the earliest pattern in the list
+  const spreadsheet = files.filter((f) => /\.(xlsx|xlsm|xls|csv)$/i.test(f.name));
+  const pool = spreadsheet.length ? spreadsheet : files;
+  for (const p of patterns) {
+    const hit = pool.find((f) => norm(f.name).indexOf(norm(p)) > -1);
+    if (hit) return hit.id;
+  }
+  return pool.length ? pool[0].id : "";
+}
+
+function populateFileSelectors(files) {
+  const opts = files.map((f) => '<option value="' + f.id + '">' + escapeHtml(f.name) + "</option>").join("");
+  ["selCases", "selAgents", "selCsa"].forEach((id) => { $(id).innerHTML = opts; });
+  $("selCases").value = bestMatch(files, ["cases vs", "cases vs. csa", "cases"]);
+  $("selAgents").value = bestMatch(files, ["agent masterlist", "masterlist", "agent master"]);
+  $("selCsa").value = bestMatch(files, ["all csas for incorrect csa", "all csas", "incorrect csa report", "all csa"]);
+}
+
+async function buildReport() {
+  const casesId = $("selCases").value;
+  const agentsId = $("selAgents").value;
+  const csaId = $("selCsa").value;
+  const fById = (id) => STATE.files.find((f) => f.id === id);
+  const cFile = fById(casesId), aFile = fById(agentsId), sFile = fById(csaId);
+  if (!cFile || !aFile || !sFile) { setStatus("Please choose all three source files.", true); return; }
+
+  setStatus("Downloading and parsing the three workbooks…", false);
+  const [casesWb, agentsWb, csaWb] = await Promise.all([
+    downloadWorkbook(cFile), downloadWorkbook(aFile), downloadWorkbook(sFile)
+  ]);
+
+  const casesRows = sheetRows(casesWb);
+  const agentRows = sheetRows(agentsWb);
+  const csaRows = sheetRows(csaWb);
+
+  STATE.mapNotes = [];
+  if (!casesRows.length) { setStatus("The Cases vs. CSA file has no data rows.", true); return; }
+
+  // ---- Resolve headers in Cases vs. CSA ----
+  const ch = Object.keys(casesRows[0]);
+  const used = [];
+  const col = {};
+  col.acct18 = findCol(ch, ["18 Digit Account ID", "18-Digit Account ID", "18 digit account id", "Account ID (18)", "18 Digit Account"], used); if (col.acct18) used.push(col.acct18);
+  col.accountId = findCol(ch, ["Account ID", "Account Id", "AccountID"], used); if (col.accountId) used.push(col.accountId);
+  col.caseNumber = findCol(ch, ["Case Number", "Case #", "CaseNumber", "Case No", "Case"], used); if (col.caseNumber) used.push(col.caseNumber);
+  col.accountName = findCol(ch, ["Account Name", "AccountName"], used); if (col.accountName) used.push(col.accountName);
+  col.kaId = findCol(ch, ["Knowledge Article ID", "Knowledge Article Id", "KA ID", "Article ID"], used); if (col.kaId) used.push(col.kaId);
+  col.kaVerId = findCol(ch, ["Knowledge Article Version ID", "Article Version ID", "KA Version ID", "Version ID"], used); if (col.kaVerId) used.push(col.kaVerId);
+  col.title = findCol(ch, ["Article Version: Title", "Article Version Title", "Article: Title", "Title"], used); if (col.title) used.push(col.title);
+  col.caseOwner = findCol(ch, ["Case Owner", "CaseOwner", "Owner"], used); if (col.caseOwner) used.push(col.caseOwner);
+  STATE.mapNotes.push("Cases vs. CSA → " + describeMap(col, ch));
+
+  // ---- Build Agent Masterlist lookup: name -> supervisor ----
+  const supMap = {};
+  if (agentRows.length) {
+    const ah = Object.keys(agentRows[0]);
+    const nameCol = findCol(ah, ["Agent Name", "Agent", "Full Name", "Employee Name", "Name", "Case Owner"]);
+    const supCol = findCol(ah, ["Case Owner - Manager", "Supervisor Name", "Supervisor", "Manager Name", "Manager", "Reporting Manager", "Team Manager", "Team Lead", "Lead"]);
+    STATE.mapNotes.push("Agent Masterlist → name: " + (nameCol || "NOT FOUND") + " | supervisor: " + (supCol || "NOT FOUND"));
+    if (nameCol && supCol) {
+      agentRows.forEach((r) => {
+        const key = normName(r[nameCol]);
+        if (key && !(key in supMap)) supMap[key] = r[supCol];
+      });
+    }
+  } else {
+    STATE.mapNotes.push("Agent Masterlist → file empty");
+  }
+
+  // ---- Build All CSAs lookup: title -> {accountId, accountName} ----
+  const csaMap = {};
+  if (csaRows.length) {
+    const sh = Object.keys(csaRows[0]);
+    const sUsed = [];
+    const titleCol = findCol(sh, ["Title", "Article Version: Title", "Article Title", "CSA Title", "Name"], sUsed); if (titleCol) sUsed.push(titleCol);
+    const sAcctId = findCol(sh, ["Account ID", "Account Id", "AccountID"], sUsed); if (sAcctId) sUsed.push(sAcctId);
+    const sAcctName = findCol(sh, ["Account name", "Account Name", "AccountName"], sUsed); if (sAcctName) sUsed.push(sAcctName);
+    STATE.mapNotes.push("All CSAs → title: " + (titleCol || "NOT FOUND") + " | Account ID: " + (sAcctId || "NOT FOUND") + " | Account name: " + (sAcctName || "NOT FOUND"));
+    if (titleCol) {
+      csaRows.forEach((r) => {
+        const key = norm(r[titleCol]);
+        if (key && !(key in csaMap)) csaMap[key] = { id: sAcctId ? r[sAcctId] : "", name: sAcctName ? r[sAcctName] : "" };
+      });
+    }
+  } else {
+    STATE.mapNotes.push("All CSAs → file empty");
+  }
+
+  // ---- Assemble report rows ----
+  const out = [];
+  casesRows.forEach((r) => {
+    const title = col.title ? r[col.title] : "";
+    const owner = col.caseOwner ? r[col.caseOwner] : "";
+    const accountId = col.accountId ? r[col.accountId] : "";
+
+    const csa = csaMap[norm(title)] || null;
+    const csaId = csa ? csa.id : "";
+    const csaName = csa ? csa.name : "";
+
+    let match;
+    if (!csa || normId(csaId) === "") match = "No CSA match";
+    else match = (normId(accountId) === normId(csaId)) ? "Yes" : "No";
+
+    const row = {};
+    row["Case Number"] = col.caseNumber ? r[col.caseNumber] : "";
+    row["18 Digit Account ID"] = col.acct18 ? r[col.acct18] : "";
+    row["Account ID"] = accountId;
+    row["Account Name"] = col.accountName ? r[col.accountName] : "";
+    row["Knowledge Article ID"] = col.kaId ? r[col.kaId] : "";
+    row["Knowledge Article Version ID"] = col.kaVerId ? r[col.kaVerId] : "";
+    row["Article Version: Title"] = title;
+    row["Case Owner"] = owner;
+    row["Case Owner - Manager"] = (owner && (normName(owner) in supMap)) ? supMap[normName(owner)] : "";
+    row["CSA Account ID"] = csaId;
+    row["CSA Account Name"] = csaName;
+    row["Account ID match?"] = match;
+    out.push(row);
+  });
+
+  STATE.reportRows = out;
+  setStatus("", false);
+  renderTable();
+  $("mapNote").textContent = "Column mapping — " + STATE.mapNotes.join("   •   ");
+}
+
+function describeMap(col, headers) {
+  const labels = {
+    caseNumber: "Case Number", acct18: "18 Digit Account ID", accountId: "Account ID",
+    accountName: "Account Name", kaId: "Knowledge Article ID", kaVerId: "Knowledge Article Version ID",
+    title: "Article Version: Title", caseOwner: "Case Owner"
+  };
+  return Object.keys(labels).map((k) => labels[k] + ": " + (col[k] || "NOT FOUND")).join(", ");
+}
+
+/* ============================================================
+   Rendering, filtering, export
+   ============================================================ */
+function escapeHtml(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function filteredRows() {
+  const q = norm($("search").value);
+  const mf = $("selMatch").value;
+  return STATE.reportRows.filter((r) => {
+    if (mf === "no" && r["Account ID match?"] !== "No") return false;
+    if (mf === "yes" && r["Account ID match?"] !== "Yes") return false;
+    if (mf === "na" && r["Account ID match?"] !== "No CSA match") return false;
+    if (q) {
+      const hay = COLUMNS.map((c) => r[c]).join(" ").toLowerCase();
+      if (hay.indexOf(q) === -1) return false;
+    }
+    return true;
+  });
+}
+
+function matchBadge(v) {
+  if (v === "Yes") return '<span class="badge yes">Yes</span>';
+  if (v === "No") return '<span class="badge no">No</span>';
+  return '<span class="badge na">No CSA match</span>';
+}
+
+function renderTable() {
+  $("headRow").innerHTML = COLUMNS.map((c) => "<th>" + escapeHtml(c) + "</th>").join("");
+  const rows = filteredRows();
+  const body = rows.map((r) => {
+    const cls = r["Account ID match?"] === "No" ? ' class="mismatch"' : "";
+    const cells = COLUMNS.map((c) => {
+      if (c === "Account ID match?") return "<td>" + matchBadge(r[c]) + "</td>";
+      const v = r[c];
+      return "<td>" + (v === "" || v == null ? '<span class="muted">—</span>' : escapeHtml(v)) + "</td>";
+    }).join("");
+    return "<tr" + cls + ">" + cells + "</tr>";
+  }).join("");
+  $("bodyRows").innerHTML = body || ('<tr><td colspan="' + COLUMNS.length + '" style="padding:24px;text-align:center;color:#999">No rows match the current filter.</td></tr>');
+
+  const total = STATE.reportRows.length;
+  const noCount = STATE.reportRows.filter((r) => r["Account ID match?"] === "No").length;
+  const naCount = STATE.reportRows.filter((r) => r["Account ID match?"] === "No CSA match").length;
+  $("rowCount").textContent = rows.length + " of " + total + " rows  •  " + noCount + " mismatches  •  " + naCount + " without CSA match";
+}
+
+function exportCsv() {
+  const rows = filteredRows();
+  const esc = (v) => {
+    const s = String(v == null ? "" : v);
+    return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const lines = [COLUMNS.map(esc).join(",")];
+  rows.forEach((r) => lines.push(COLUMNS.map((c) => esc(r[c])).join(",")));
+  const blob = new Blob(["\ufeff" + lines.join("\r\n")], { type: "text/csv;charset=utf-8;" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "KCS_Incorrect_CSA_Report.csv";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+/* ============================================================
+   Wire up events + boot
+   ============================================================ */
+$("signInBtn").addEventListener("click", signIn);
+$("loginCardBtn").addEventListener("click", signIn);
+$("signOutBtn").addEventListener("click", () => { signOut(); onSignedOut(); });
+$("refreshBtn").addEventListener("click", loadFromSharePoint);
+$("rebuildBtn").addEventListener("click", () => { buildReport().catch((e) => setStatus(e.message || String(e), true)); });
+$("selCases").addEventListener("change", () => { buildReport().catch((e) => setStatus(e.message || String(e), true)); });
+$("selAgents").addEventListener("change", () => { buildReport().catch((e) => setStatus(e.message || String(e), true)); });
+$("selCsa").addEventListener("change", () => { buildReport().catch((e) => setStatus(e.message || String(e), true)); });
+$("selMatch").addEventListener("change", renderTable);
+$("search").addEventListener("input", renderTable);
+$("exportBtn").addEventListener("click", exportCsv);
+
+// 3. Sign-in button starts disabled ("Initializing…"); enabled only after msalReady resolves.
+msalReady.then((instance) => {
+  ["signInBtn", "loginCardBtn"].forEach((id) => {
+    const b = $(id);
+    b.disabled = false;
+    b.textContent = "Sign in with Microsoft";
+  });
+  const acct = instance.getActiveAccount() || instance.getAllAccounts()[0];
+  if (acct) { instance.setActiveAccount(acct); onSignedIn(); }
+}).catch((e) => {
+  ["signInBtn", "loginCardBtn"].forEach((id) => { $(id).textContent = "Sign-in unavailable"; });
+  showToast("Could not initialize sign-in: " + (e.message || e));
+});
+</script>
+</body>
+</html>
