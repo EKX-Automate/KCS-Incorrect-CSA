@@ -266,13 +266,32 @@ function loadMsalScript() {
 }
 
 /* ============================================================
+   Detect when this page is loaded *as the MSAL auth popup*.
+   Because the redirect URI is the full app page, the sign-in popup
+   loads this same app. If this instance consumed/cleared the auth
+   response, the opener could not read the code and the popup would be
+   treated as "cancelled" (landing you back on the login page). When we
+   are the auth popup, we must stay passive: let the opener read the
+   hash and close us.
+   ============================================================ */
+const AUTH_RESPONSE_IN_HASH = /[#&](code|id_token|access_token|state|error)=/.test(window.location.hash);
+const IS_AUTH_POPUP = (() => {
+  try { return !!(window.opener && window.opener !== window) && AUTH_RESPONSE_IN_HASH; }
+  catch (e) { return AUTH_RESPONSE_IN_HASH; }
+})();
+
+/* ============================================================
    2. Single initialization promise
    ============================================================ */
 const msalReady = (async () => {
   await loadMsalScript();
   const instance = new msal.PublicClientApplication(msalConfig);
   await instance.initialize();
-  await instance.handleRedirectPromise();   // completes any redirect-based sign-in
+  // Only process the redirect response in the TOP window (redirect flow).
+  // In the auth popup, skip it so the hash survives for the opener to read.
+  if (!IS_AUTH_POPUP) {
+    await instance.handleRedirectPromise();
+  }
   return instance;
 })();
 
@@ -722,18 +741,25 @@ $("search").addEventListener("input", renderTable);
 $("exportBtn").addEventListener("click", exportCsv);
 
 // 3. Sign-in button starts disabled ("Initializing…"); enabled only after msalReady resolves.
-msalReady.then((instance) => {
-  ["signInBtn", "loginCardBtn"].forEach((id) => {
-    const b = $(id);
-    b.disabled = false;
-    b.textContent = "Sign in with Microsoft";
+// When this page is the auth popup, do NOT bootstrap the UI — let the opener finish the
+// handshake and close this window.
+if (!IS_AUTH_POPUP) {
+  msalReady.then((instance) => {
+    ["signInBtn", "loginCardBtn"].forEach((id) => {
+      const b = $(id);
+      b.disabled = false;
+      b.textContent = "Sign in with Microsoft";
+    });
+    const acct = instance.getActiveAccount() || instance.getAllAccounts()[0];
+    if (acct) { instance.setActiveAccount(acct); onSignedIn(); }
+  }).catch((e) => {
+    ["signInBtn", "loginCardBtn"].forEach((id) => { $(id).textContent = "Sign-in unavailable"; });
+    showToast("Could not initialize sign-in: " + (e.message || e));
   });
-  const acct = instance.getActiveAccount() || instance.getAllAccounts()[0];
-  if (acct) { instance.setActiveAccount(acct); onSignedIn(); }
-}).catch((e) => {
-  ["signInBtn", "loginCardBtn"].forEach((id) => { $(id).textContent = "Sign-in unavailable"; });
-  showToast("Could not initialize sign-in: " + (e.message || e));
-});
+} else {
+  // Running inside the MSAL popup: ensure msalReady still runs (loads MSAL) but take no UI action.
+  msalReady.catch(() => {});
+}
 </script>
 </body>
 </html>
